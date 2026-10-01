@@ -1,4 +1,3 @@
-```javascript
 // 会社の基本ロジック。外部通信・外部APIは使用しない。
 // ルールベースの初期版。自由な推論を行うAIモデルではありません。
 
@@ -230,4 +229,3 @@ export function migrateState(oldState) {
     logs: oldState.logs.slice(0, 100)
   };
 }
-```
