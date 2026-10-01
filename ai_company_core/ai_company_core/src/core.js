@@ -1,4 +1,6 @@
 // 会社の基本ロジック。外部通信・外部APIは使用しない。
+// ルールベースの初期版。自由な推論を行うAIモデルではありません。
+
 export const DEPARTMENTS = {
   ceo: "AI社長",
   market: "市場調査",
@@ -8,74 +10,155 @@ export const DEPARTMENTS = {
   audit: "監査"
 };
 
-export function makeTask(title, source = "human") {
+const MAX_TASKS_PER_PLAN = 5;
+
+export function makeTask(title, source = "human", extra = {}) {
+  const cleanTitle = String(title ?? "").trim();
+  if (!cleanTitle) throw new Error("タスク名を入力してください。");
+
+  const now = new Date().toISOString();
   return {
     id: crypto.randomUUID(),
-    title: title.trim(),
+    title: cleanTitle,
     source,
     status: "pending",
-    department: chooseDepartment(title),
-    priority: scorePriority(title),
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
+    department: extra.department ?? chooseDepartment(cleanTitle),
+    priority: extra.priority ?? scorePriority(cleanTitle),
+    parentId: extra.parentId ?? null,
+    createdAt: now,
+    updatedAt: now,
     result: null
   };
 }
 
 function chooseDepartment(title) {
   const s = title.toLowerCase();
-  if (/売上|費用|予算|利益|価格|財務|収益/.test(s)) return "finance";
-  if (/コード|修正|不具合|保守|システム|実装|技術/.test(s)) return "tech";
-  if (/商品|製品|作成|開発|制作|試作/.test(s)) return "product";
-  if (/市場|競合|顧客|需要|調査|アイデア|案/.test(s)) return "market";
+  if (/売上|費用|予算|利益|価格|財務|収益|コスト/.test(s)) return "finance";
+  if (/コード|修正|不具合|保守|システム|実装|技術|テスト/.test(s)) return "tech";
+  if (/商品|製品|作成|開発|制作|試作|仕様/.test(s)) return "product";
+  if (/市場|競合|顧客|需要|調査|アイデア|案|利用者/.test(s)) return "market";
+  if (/監査|安全|リスク|確認|検証/.test(s)) return "audit";
   return "ceo";
 }
 
 function scorePriority(title) {
-  if (/緊急|障害|停止|安全/.test(title)) return 1;
-  if (/収益|売上|顧客|商品/.test(title)) return 2;
+  if (/緊急|障害|停止|安全|セキュリティ/.test(title)) return 1;
+  if (/収益|売上|顧客|商品|販売/.test(title)) return 2;
   return 3;
+}
+
+// ルールに合う大きな仕事を、実行可能な小タスクに分解する。
+// ここでは計画を作るだけで、外部調査・制作・取引は行わない。
+export function createPlan(title) {
+  const s = String(title ?? "").trim();
+  if (!s) return [];
+
+  let plan;
+  if (/商品|製品|開発|制作|収益化|販売|サービス/.test(s)) {
+    plan = [
+      { department: "market", title: `想定顧客と解決する課題を整理する：${s}` },
+      { department: "product", title: `最小試作品の内容と完成条件を決める：${s}` },
+      { department: "finance", title: `費用・価格・収益の仮説を整理する：${s}` },
+      { department: "audit", title: `計画の前提と主なリスクを確認する：${s}` }
+    ];
+  } else if (/市場|競合|顧客|需要|調査/.test(s)) {
+    plan = [
+      { department: "market", title: `調査対象と確認したい仮説を定義する：${s}` },
+      { department: "audit", title: `調査結果の根拠と不足情報を確認する：${s}` }
+    ];
+  } else if (/改善|修正|不具合|保守|システム|コード/.test(s)) {
+    plan = [
+      { department: "tech", title: `対象・再現条件・完了条件を整理する：${s}` },
+      { department: "audit", title: `変更時のリスクと復旧方法を確認する：${s}` }
+    ];
+  } else {
+    plan = [
+      { department: chooseDepartment(s), title: `目的と完了条件を具体化する：${s}` },
+      { department: "audit", title: `実行前に前提・リスク・不足情報を確認する：${s}` }
+    ];
+  }
+
+  return plan.slice(0, MAX_TASKS_PER_PLAN);
 }
 
 export function runCycle(state) {
   const next = structuredClone(state);
-  next.cycle += 1;
+  next.cycle = (Number(next.cycle) || 0) + 1;
+
   const task = next.tasks
     .filter(t => t.status === "pending")
-    .sort((a,b) => a.priority - b.priority || a.createdAt.localeCompare(b.createdAt))[0];
+    .sort((a, b) =>
+      (a.priority ?? 3) - (b.priority ?? 3) ||
+      String(a.createdAt).localeCompare(String(b.createdAt))
+    )[0];
 
   if (!task) {
-    addLog(next, "実行サイクル " + next.cycle + "：実行できるタスクはありません。");
+    addLog(next, `実行サイクル ${next.cycle}：実行できるタスクはありません。`);
     return next;
   }
 
-  const dept = DEPARTMENTS[task.department] ?? DEPARTMENTS.ceo;
   const result = processTask(task);
   task.status = result.status;
   task.result = result.message;
   task.updatedAt = new Date().toISOString();
-  addLog(next, `${dept}が「${task.title}」を処理：${result.message}`);
+  addLog(next, `${DEPARTMENTS[task.department] ?? DEPARTMENTS.ceo}が「${task.title}」を処理：${result.message}`);
+
+  // 親タスクを初めて処理したときだけ、計画から子タスクを作成する。
+  if (task.department === "ceo" && !task.planCreated) {
+    const children = createPlan(task.title);
+    task.planCreated = true;
+    task.result += `（作業計画 ${children.length} 件を作成）`;
+    for (const item of children) {
+      const child = makeTask(item.title, "ceo-plan", {
+        department: item.department,
+        parentId: task.id
+      });
+      next.tasks.push(child);
+    }
+    if (children.length) {
+      addLog(next, `AI社長が「${task.title}」を ${children.length} 件の作業に分解しました。`);
+    }
+  }
+
   return next;
 }
 
-// 初期版では安全のため、実際の外部操作や金銭取引は行わず、処理案を返す。
 function processTask(task) {
   const templates = {
-    ceo: "内容を整理しました。具体的な調査・制作タスクに分解する必要があります。",
-    market: "市場調査タスクとして登録しました。次段階では、調査対象・仮説・検証方法を定義します。",
-    product: "商品開発タスクとして整理しました。次段階では最小試作品と完了条件を定義します。",
-    finance: "財務タスクとして整理しました。金額や取引を伴う処理はまだ実行しません。",
-    tech: "技術タスクとして整理しました。変更前に対象ファイル、テスト、復旧手順を指定する必要があります。",
-    audit: "監査タスクとして整理しました。根拠と確認項目を記録する設計です。"
+    ceo: "目的を整理し、ルールに基づく作業計画を作成しました。実際の調査や制作はまだ行っていません。",
+    market: "調査の対象・仮説を整理しました。外部データの取得や市場の事実確認は行っていません。",
+    product: "商品開発の作業項目を整理しました。試作品そのものはまだ制作していません。",
+    finance: "費用・価格・収益の検討項目を整理しました。金銭取引や実際の会計処理は行っていません。",
+    tech: "技術作業の対象と完了条件を整理しました。コード変更やシステム操作は行っていません。",
+    audit: "確認項目を整理しました。独立した証拠の検証や安全性の保証は行っていません。"
   };
-  return {status:"done", message:templates[task.department] ?? templates.ceo};
+  return {
+    status: "done",
+    message: templates[task.department] ?? templates.ceo
+  };
 }
 
 function addLog(state, message) {
-  state.logs.unshift({at:new Date().toISOString(), message});
-  state.logs = state.logs.slice(0,100);
+  state.logs.unshift({ at: new Date().toISOString(), message });
+  state.logs = state.logs.slice(0, 100);
 }
 
 export function initialState() {
-  return {version:1, cycle:0, tasks:[], logs:[]};
+  return { version: 2, cycle: 0, tasks: [], logs: [] };
+}
+
+export function migrateState(oldState) {
+  if (!oldState || !Array.isArray(oldState.tasks) || !Array.isArray(oldState.logs)) {
+    return initialState();
+  }
+  return {
+    version: 2,
+    cycle: Number(oldState.cycle) || 0,
+    tasks: oldState.tasks.map(t => ({
+      ...t,
+      parentId: t.parentId ?? null,
+      planCreated: Boolean(t.planCreated)
+    })),
+    logs: oldState.logs.slice(0, 100)
+  };
 }
