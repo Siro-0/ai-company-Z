@@ -1,4 +1,4 @@
-```javascript
+
 import {
   makeTask,
   runCycle,
@@ -7,200 +7,305 @@ import {
   DEPARTMENTS
 } from "./core.js";
 
-const KEY = "ai-company-core-v1";
-const $ = id => document.getElementById(id);
+const KEY = "ai_company_core_v1";
 
-let state = load();
+const elements = {
+  ideaForm: document.getElementById("ideaForm"),
+  ideaInput: document.getElementById("ideaInput"),
+  pendingCount: document.getElementById("pendingCount"),
+  doneCount: document.getElementById("doneCount"),
+  cycleCount: document.getElementById("cycleCount"),
+  tasks: document.getElementById("tasks"),
+  logs: document.getElementById("logs"),
+  runBtn: document.getElementById("runBtn"),
+  exportBtn: document.getElementById("exportBtn"),
+  resetBtn: document.getElementById("resetBtn")
+};
 
-// 保存データを読み込む
-function load() {
+let state = loadState();
+
+function loadState() {
   try {
-    const raw = localStorage.getItem(KEY);
+    const saved = localStorage.getItem(KEY);
 
-    if (!raw) {
+    if (!saved) {
       return initialState();
     }
 
-    const parsed = JSON.parse(raw);
-
-    if (!Array.isArray(parsed.tasks) || !Array.isArray(parsed.logs)) {
-      return initialState();
-    }
-
-    return migrateState(parsed);
+    return migrateState(JSON.parse(saved));
   } catch (error) {
-    console.error("データの読み込みに失敗しました:", error);
+    console.error("保存データの読み込みに失敗しました:", error);
     return initialState();
   }
 }
 
-// データを保存する
-function save() {
-  try {
-    localStorage.setItem(KEY, JSON.stringify(state));
-  } catch (error) {
-    alert("ブラウザへの保存に失敗しました。JSONを書き出してバックアップしてください。");
-    console.error(error);
-  }
+function saveState() {
+  localStorage.setItem(KEY, JSON.stringify(state));
 }
 
-// HTMLに安全に表示するための変換
-function esc(value) {
-  return String(value ?? "").replace(/[&<>"']/g, c => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#39;"
-  }[c]));
+function escapeHTML(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (char) => {
+    const entities = {
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;"
+    };
+
+    return entities[char];
+  });
 }
 
-// 商品案の詳細を表示する
 function renderArtifact(artifact) {
   if (!artifact) return "";
 
-  if (artifact.type === "product_ideas" && Array.isArray(artifact.items)) {
+  if (
+    artifact.type === "product_ideas" &&
+    Array.isArray(artifact.items)
+  ) {
     return `
       <section class="artifact">
-        <h4>${esc(artifact.title || "生成された商品案")}</h4>
-        ${artifact.items.map(item => `
-          <article class="idea-card">
-            <h5>${esc(item.number)}. ${esc(item.name)}</h5>
-            <p><strong>対象ユーザー：</strong>${esc(item.audience)}</p>
-            <p><strong>解決する問題：</strong>${esc(item.problem)}</p>
-            <p><strong>解決方法：</strong>${esc(item.solution)}</p>
-            <p><strong>販売方法：</strong>${esc(item.sales)}</p>
-          </article>
-        `).join("")}
-        <p class="artifact-note">
-          ※ ルールベースで作成した仮案です。市場調査や需要の検証は行っていません。
-        </p>
+        <h4>生成された商品アイデア</h4>
+        <div class="artifact-list">
+          ${artifact.items.map((item, index) => `
+            <article class="artifact-item">
+              <strong>${index + 1}. ${escapeHTML(item.title)}</strong>
+              <p>${escapeHTML(item.description)}</p>
+              ${
+                item.target
+                  ? `<small>対象: ${escapeHTML(item.target)}</small>`
+                  : ""
+              }
+            </article>
+          `).join("")}
+        </div>
       </section>
     `;
   }
 
-  return "";
+  return `
+    <section class="artifact">
+      <h4>処理結果</h4>
+      <pre>${escapeHTML(JSON.stringify(artifact, null, 2))}</pre>
+    </section>
+  `;
 }
 
-// 画面を更新する
-function render() {
-  $("pendingCount").textContent =
-    state.tasks.filter(t => t.status === "pending").length;
+function renderTasks() {
+  if (!elements.tasks) return;
 
-  $("doneCount").textContent =
-    state.tasks.filter(t => t.status === "done").length;
+  const tasks = Array.isArray(state.tasks) ? state.tasks : [];
 
-  $("cycleCount").textContent = state.cycle;
+  if (tasks.length === 0) {
+    elements.tasks.innerHTML = `
+      <p class="empty">まだタスクはありません。</p>
+    `;
+    return;
+  }
 
-  const tasks = [...state.tasks].sort((a, b) =>
-    String(b.createdAt).localeCompare(String(a.createdAt))
-  );
+  elements.tasks.innerHTML = tasks.map((task) => {
+    const status = task.status || "pending";
+    const statusLabel =
+      status === "done" ? "完了" :
+      status === "processing" ? "処理中" :
+      "待機中";
 
-  $("tasks").innerHTML = tasks.length
-    ? tasks.map(t => `
-      <article class="task">
-        <div class="tasktop">
-          <span class="tasktitle">${esc(t.title)}</span>
-          <span class="pill">
-            ${t.status === "pending" ? "保留中" : "完了"}
-          </span>
+    return `
+      <article class="task-card">
+        <div class="task-header">
+          <strong>${escapeHTML(task.title)}</strong>
+          <span class="task-status">${statusLabel}</span>
         </div>
 
-        <div class="meta">
-          ${esc(DEPARTMENTS[t.department] ?? "未分類")}
-          ・ 優先度 ${Number(t.priority) || 3}
-          ${t.parentId ? " ・ 社長の計画から作成" : ""}
-          ・ ${new Date(t.createdAt).toLocaleString("ja-JP")}
+        <p>${escapeHTML(task.description || "")}</p>
+
+        <div class="task-meta">
+          <span>部署: ${escapeHTML(task.department || "未割当")}</span>
+          <span>優先度: ${escapeHTML(task.priority ?? "通常")}</span>
         </div>
 
-        ${t.result
-          ? `<div class="taskresult">${esc(t.result)}</div>`
-          : ""}
+        ${
+          task.result
+            ? `<div class="task-result">${escapeHTML(task.result)}</div>`
+            : ""
+        }
 
-        ${renderArtifact(t.artifact)}
+        ${renderArtifact(task.artifact)}
       </article>
-    `).join("")
-    : '<p class="empty">まだタスクはありません。</p>';
-
-  $("logs").innerHTML = state.logs.length
-    ? state.logs.map(l => `
-      <li>
-        <time>${new Date(l.at).toLocaleString("ja-JP")}</time>
-        — ${esc(l.message)}
-      </li>
-    `).join("")
-    : '<li class="empty">ログはまだありません。</li>';
+    `;
+  }).join("");
 }
 
-// タスク登録
-$("ideaForm").addEventListener("submit", event => {
+function renderLogs() {
+  if (!elements.logs) return;
+
+  const logs = Array.isArray(state.logs) ? state.logs : [];
+
+  if (logs.length === 0) {
+    elements.logs.innerHTML = `
+      <p class="empty">まだ活動ログはありません。</p>
+    `;
+    return;
+  }
+
+  elements.logs.innerHTML = logs
+    .slice()
+    .reverse()
+    .map((log) => {
+      const message =
+        typeof log === "string"
+          ? log
+          : log.message || JSON.stringify(log);
+
+      return `
+        <div class="log-item">
+          ${escapeHTML(message)}
+        </div>
+      `;
+    })
+    .join("");
+}
+
+function renderStats() {
+  const tasks = Array.isArray(state.tasks) ? state.tasks : [];
+
+  const pending = tasks.filter(
+    (task) => task.status !== "done"
+  ).length;
+
+  const done = tasks.filter(
+    (task) => task.status === "done"
+  ).length;
+
+  if (elements.pendingCount) {
+    elements.pendingCount.textContent = pending;
+  }
+
+  if (elements.doneCount) {
+    elements.doneCount.textContent = done;
+  }
+
+  if (elements.cycleCount) {
+    elements.cycleCount.textContent = state.cycleCount ?? 0;
+  }
+}
+
+function render() {
+  renderStats();
+  renderTasks();
+  renderLogs();
+}
+
+function addLog(message) {
+  if (!Array.isArray(state.logs)) {
+    state.logs = [];
+  }
+
+  state.logs.push({
+    message,
+    time: new Date().toISOString()
+  });
+}
+
+function handleSubmit(event) {
   event.preventDefault();
 
-  const title = $("ideaInput").value.trim();
+  const title = elements.ideaInput?.value.trim();
+
   if (!title) return;
 
   try {
     const task = makeTask(title);
     state.tasks.push(task);
 
-    state.logs.unshift({
-      at: new Date().toISOString(),
-      message: `新しいタスクを登録：「${title}」`
-    });
+    addLog(`新しいタスクを登録: ${title}`);
 
-    state.logs = state.logs.slice(0, 100);
-
-    $("ideaInput").value = "";
-
-    save();
+    saveState();
     render();
-  } catch (error) {
-    alert(error.message || "タスクを登録できませんでした。");
-  }
-});
 
-// 1サイクル実行
-$("runBtn").addEventListener("click", () => {
+    elements.ideaInput.value = "";
+  } catch (error) {
+    console.error("タスク登録エラー:", error);
+    addLog("タスクの登録に失敗しました。");
+    saveState();
+    render();
+  }
+}
+
+function handleRun() {
+  if (!Array.isArray(state.tasks) || state.tasks.length === 0) {
+    addLog("実行できるタスクがありません。");
+    saveState();
+    render();
+    return;
+  }
+
   try {
     state = runCycle(state);
-    save();
+
+    addLog("AI企業の処理サイクルを実行しました。");
+
+    saveState();
     render();
   } catch (error) {
     console.error("実行エラー:", error);
-    alert("タスクの実行中にエラーが発生しました。");
+    addLog(`処理中にエラーが発生: ${error.message}`);
+    saveState();
+    render();
   }
-});
+}
 
-// JSONバックアップの書き出し
-$("exportBtn").addEventListener("click", () => {
-  const blob = new Blob(
-    [JSON.stringify(state, null, 2)],
-    { type: "application/json" }
-  );
+function handleExport() {
+  try {
+    const data = JSON.stringify(state, null, 2);
+    const blob = new Blob([data], {
+      type: "application/json"
+    });
 
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
 
-  a.href = url;
-  a.download = "ai-company-state.json";
-  a.click();
+    link.href = url;
+    link.download = "ai-company-data.json";
 
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-});
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
 
-// データのリセット
-$("resetBtn").addEventListener("click", () => {
-  const confirmed = confirm(
-    "保存したタスクとログをすべて削除します。先にJSONを書き出しましたか？"
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    console.error("エクスポートエラー:", error);
+    alert("データの出力に失敗しました。");
+  }
+}
+
+function handleReset() {
+  const confirmed = window.confirm(
+    "保存されているタスクやログをすべて削除しますか？"
   );
 
   if (!confirmed) return;
 
   state = initialState();
-  save();
+  saveState();
   render();
-});
+}
 
-// 初期表示
+if (elements.ideaForm) {
+  elements.ideaForm.addEventListener("submit", handleSubmit);
+}
+
+if (elements.runBtn) {
+  elements.runBtn.addEventListener("click", handleRun);
+}
+
+if (elements.exportBtn) {
+  elements.exportBtn.addEventListener("click", handleExport);
+}
+
+if (elements.resetBtn) {
+  elements.resetBtn.addEventListener("click", handleReset);
+}
+
 render();
-```
